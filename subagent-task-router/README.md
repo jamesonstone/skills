@@ -28,10 +28,27 @@ Given a list of N coding tasks (each modifying different files), the router:
 2. **Detects overlaps** using file-level, package-level, and import-dependency analysis
 3. **Builds an overlap graph** and partitions tasks into independent lanes
 4. **Produces an execution plan** that maximizes parallel execution
-5. **Routes lanes to agents** (or runs them sequentially when coupled)
+5. **Routes lanes into git worktrees and agents** (or runs them sequentially when coupled)
 
 **Input:** A `TASKS.md` file (or inline task list) with structured task details.
 **Output:** An execution plan showing which tasks run in parallel and which run sequentially.
+
+---
+
+## Ideal Workflow
+
+The ideal workflow uses a confirmation gate plus `git worktree` isolation:
+
+1. Router analyzes `TASKS.md` and detects the execution lanes.
+2. Router presents the plan and waits for explicit approval.
+3. Router creates one branch per lane from the same base commit.
+4. Router creates one worktree per lane at `~/worktrees/<repo>-<lane-branch>`.
+5. Router spawns one agent per worktree.
+6. Each agent executes its lane sequentially and commits locally.
+7. User reviews each worktree.
+8. Router recommends merge order.
+9. Push and PR creation happen only if the user explicitly requests them.
+10. Worktrees are cleaned up after review or explicit cleanup approval.
 
 ---
 
@@ -86,8 +103,11 @@ The router runs through 5 phases:
 ### Phase 5: Dispatch (User-Confirmed)
 
 - Only runs when the user explicitly approves the plan
+- Creates one branch per lane from the same base commit
+- Creates one worktree per lane at `~/worktrees/<repo>-<lane-branch>`
 - Spawns one agent per lane with full task details and blast-radius info
-- Agents execute their lane's tasks sequentially
+- Agents execute their lane's tasks sequentially and commit locally
+- Stops before push/PR unless the user explicitly asks for publish steps
 
 ---
 
@@ -191,9 +211,13 @@ The router outputs something like:
 
 **Parallelism:** 2 lanes, 1 with depth 2 (sequential), 1 independent.
 
-**Suggested branch names:**
+**Suggested branches:**
 - lane-1-auth: T001 + T002
 - lane-2-audit: T003
+
+**Suggested worktree paths:**
+- `~/worktrees/<repo>-lane-1-auth`
+- `~/worktrees/<repo>-lane-2-audit`
 
 Dispatch now, or adjust the plan?
 ```
@@ -208,9 +232,11 @@ If the plan looks good:
 
 The router then:
 
-- Spins up agents for each lane
+- Creates lane branches and worktrees
+- Spins up agents for each lane worktree
 - Each agent receives its task list + blast-radius files
 - Tasks execute, minimizing merge conflicts
+- Each lane commits locally and stops for review
 
 ---
 
@@ -242,7 +268,7 @@ When triggered:
 1. Search for `TASKS.md` in spec directories
 2. Run Phase 1–3 (research, analyze, partition)
 3. Present the plan to the user
-4. Wait for confirmation before dispatching agents
+4. Wait for confirmation before dispatching agents or creating worktrees
 
 ---
 
@@ -415,14 +441,19 @@ T003
 - **Max depth:** 2 (Lane 1 sequential tasks)
 - **Concurrency gain:** 1.5x speedup (2 lanes, avg depth 1.5)
 
-**Suggested branch names:**
+**Suggested branches and worktrees:**
 
-- `lane-1-middleware-auth`
+- `lane-1-middleware-auth` → `~/worktrees/<repo>-lane-1-middleware-auth`
+- `lane-2-audit` → `~/worktrees/<repo>-lane-2-audit`
+
+**Recommended merge order:**
+
 - `lane-2-audit`
+- `lane-1-middleware-auth`
 
 **Next step:**
 Approve the plan or adjust groupings. Once approved, each lane will be routed
-to its own agent for parallel execution.
+to its own worktree and agent for parallel execution.
 ```
 
 Include **blast-radius evidence** so the user can validate or override:
@@ -457,40 +488,56 @@ Include **blast-radius evidence** so the user can validate or override:
 
 #### For Subagent-Capable Runtimes
 
-Spawn one agent per lane:
+Create one branch and one worktree per lane, then spawn one agent per worktree:
 
-```
+```plaintext
 Agent 1 (Lane 1):
+  Worktree: ~/worktrees/<repo>-lane-1-auth-middleware
+  Branch: lane-1-auth-middleware
   Task list: [T001, T002]
   Blast-radius files: [pkg/middleware/jwt.go, pkg/auth/identity.go, ...]
   Project context: (from AGENTS.md, CLAUDE.md, etc.)
 
 Agent 2 (Lane 2):
+  Worktree: ~/worktrees/<repo>-lane-2-audit
+  Branch: lane-2-audit
   Task list: [T003]
   Blast-radius files: [pkg/audit/logger.go, ...]
   Project context: (same as above)
 ```
 
-Each agent executes its tasks sequentially and reports results.
+Each agent executes its tasks sequentially, commits locally, and reports results.
+Pushes and PRs are explicit follow-up steps after review. If `gh` is unavailable
+or the repo has no GitHub remote, stop at local commits and publish manually later.
 
 #### For Manual Execution
 
-Print branch names and instructions:
+Print worktree commands and instructions:
 
-```
+```bash
 ## Ready to Execute
 
 ### Lane 1 (Seq. Depth 2)
-git checkout -b lane-1-auth-middleware
+./scripts/worktree.sh create --repo-root . --branch lane-1-auth-middleware --base main
+# cd ~/worktrees/<repo>-lane-1-auth-middleware
 # Execute T001, then T002
 # Details: see blast-radius evidence above
 
 ### Lane 2 (Seq. Depth 1)
-git checkout -b lane-2-audit
+./scripts/worktree.sh create --repo-root . --branch lane-2-audit --base main
+# cd ~/worktrees/<repo>-lane-2-audit
 # Execute T003
 # Details: see blast-radius evidence above
 
-After each lane completes, merge back to main and verify integration.
+After each lane completes, review the local commits, then push or open PRs only
+if you want to publish them.
+```
+
+After review or publish, remove worktrees:
+
+```bash
+./scripts/worktree.sh remove --repo-root . --branch lane-1-auth-middleware
+./scripts/worktree.sh remove --repo-root . --branch lane-2-audit
 ```
 
 ---
@@ -719,7 +766,8 @@ The Subagent Task Router transforms a todo list of coding tasks into a maximally
 2. **Detecting** overlaps using file, package, and import-level analysis
 3. **Partitioning** tasks into independent lanes
 4. **Planning** parallel execution while respecting dependencies
-5. **Dispatching** lanes to agents (or manual execution)
+5. **Dispatching** lanes to worktrees and agents (or manual execution)
+6. **Stopping at local commits** so review happens before push/PR
 
 **Use it when:**
 
@@ -732,4 +780,5 @@ The Subagent Task Router transforms a todo list of coding tasks into a maximally
 - Create a `TASKS.md` file with your tasks
 - Invoke the router
 - Review the execution plan
-- Approve and dispatch
+- Approve worktree creation and dispatch
+- Review local lane commits before any publish step

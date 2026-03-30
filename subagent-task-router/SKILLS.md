@@ -5,7 +5,7 @@ description: >
   research which files and code areas each task touches, detect overlaps, and
   produce a maximally parallel execution plan that groups overlapping tasks
   onto the same sequential lane while letting independent tasks run in parallel
-  via subagents. Use this skill whenever the user says "run my tasks",
+  via lane-specific git worktrees and subagents. Use this skill whenever the user says "run my tasks",
   "execute TASKS.md", "parallelize these tasks", "route tasks", "spin up
   agents for my tasks", mentions a TASKS.md file in a spec directory, or asks
   to break work into parallel lanes. Also trigger when the user asks to
@@ -16,8 +16,8 @@ description: >
 # Subagent Task Router
 
 Route a set of coding tasks into maximally parallel execution lanes by
-analyzing codebase overlap, then dispatch each lane to an agent (or run
-sequentially when full overlap is detected).
+analyzing codebase overlap, then dispatch each lane onto its own git
+worktree and agent (or run sequentially when full overlap is detected).
 
 Works with any coding agent that can access the filesystem: Claude Code,
 Codex, Cursor, Aider, or manual execution.
@@ -32,6 +32,8 @@ into independent groups, and runs each group on its own agent.
 **Default mode is plan-only.** The skill outputs the execution plan and waits
 for user confirmation before dispatching any agents. This makes the plan
 portable — the user can hand it to Codex, Claude Code, or execute manually.
+When the user approves execution, the preferred dispatch model is one branch
+and one git worktree per lane rooted at `~/worktrees/<repo>-<lane-branch>`.
 
 ## Workflow
 
@@ -177,10 +179,15 @@ T001: [files...] + importers: [files...]
 T002: [files...]
 ...
 
-### Suggested Branch Names (for branch-based dispatch)
-lane-1/auth-middleware
-lane-2/records
-lane-3/bwell
+### Suggested Branches and Worktrees
+lane-1-auth-middleware  -> ~/worktrees/<repo>-lane-1-auth-middleware
+lane-2-records          -> ~/worktrees/<repo>-lane-2-records
+lane-3-bwell            -> ~/worktrees/<repo>-lane-3-bwell
+
+### Recommended Merge Order
+lane-3-bwell
+lane-2-records
+lane-1-auth-middleware
 ```
 
 Include the blast-radius evidence so the user can override grouping.
@@ -190,28 +197,43 @@ Ask: "Dispatch these lanes now, or adjust the plan?"
 
 Only proceed when the user explicitly confirms.
 
-**Subagent-capable runtimes (Claude Code, Cowork):**
+**Worktree-first dispatch (preferred for Codex, Claude Code, Cursor):**
 
-- Spawn one agent per lane.
+- Create one branch per lane from the same base commit. Do not stack branches
+  unless the user explicitly asks for it.
+- Create one git worktree per lane under
+  `~/worktrees/<repo>-<lane-branch>`. Keep the layout flat across repos.
+- Spawn one agent per lane, rooted in that lane's worktree.
 - Each agent receives:
   - The ordered list of tasks for its lane
   - The full task details (scope, acceptance)
   - The blast-radius file list (so it knows where to focus)
   - Project context from `AGENTS.md`, `CLAUDE.md`, `CODEX.md`, or equivalent
 - Agents execute tasks sequentially within their lane.
+- Each agent commits locally on its lane branch and then stops.
+- Do not push branches or open PRs by default. Those are explicit follow-up
+  steps after the user reviews the worktrees.
 
 **Single-agent runtimes (Claude.ai, no subagent support):**
 
 - Execute lanes sequentially (lane 1 → lane 2 → …).
 - Within each lane, execute tasks in order.
 - Inform the user: "No subagent support — running lanes sequentially."
+- If git is available, still prefer lane-specific worktrees for isolation.
 
-**Branch-based parallelism (Codex, GitHub Actions):**
+**Optional publish flow (only on explicit user request):**
 
-- Each lane operates on its own branch forked from the same base commit.
-- The execution plan includes suggested branch names.
-- After all lanes complete, the user merges branches. Lanes are conflict-free
-  by construction if the blast-radius research was accurate.
+- Push each reviewed lane branch.
+- Open PRs if the repo has a GitHub remote and `gh` is available.
+- Recommend merge order, but keep all PRs based on the same base branch.
+- If `gh` is unavailable or the repo has no GitHub remote, stop after local
+  commits and let the user publish manually.
+
+**Cleanup:**
+
+- Leave worktrees in place after local commits so the user can review them.
+- Remove worktrees only after review is complete or when the user explicitly
+  asks for cleanup.
 
 **Error handling:** If a lane fails mid-execution, other running lanes
 continue. Failures are collected and reported in Phase 6. Do not halt
@@ -257,6 +279,13 @@ feature progress. Agents should never leave TASKS.md stale after execution.
 - **Agents can't cross filesystem boundaries.** Codex and similar sandboxed
   agents operate in isolated checkouts. Never assume one agent can read
   another agent's working tree.
+- **Use git worktrees for isolation.** Do not bounce a single checkout across
+  multiple lane branches. Create one worktree per lane under `~/worktrees`.
+- **All lane branches share the same base commit.** Recommend merge order
+  later; do not create stacked branches by default.
+- **Local commits are the trust boundary.** Agents may commit locally in their
+  assigned worktrees, but they should never push or open PRs unless the user
+  explicitly requests that publish step.
 - **Lanes are fault-isolated.** A failure in one lane does not halt others.
   Independent lanes continue; failures are reported at the end.
 
@@ -271,6 +300,11 @@ You are executing a lane of coding tasks sequentially.
 ## Project Context
 <contents of AGENTS.md, CLAUDE.md, CODEX.md, or equivalent — whichever exists>
 
+## Worktree
+Path: <~/worktrees/<repo>-<lane-branch>>
+Branch: <lane branch name>
+Base branch: <shared base branch>
+
 ## Your Tasks (execute in order)
 
 ### Task 1: <title>
@@ -283,11 +317,14 @@ You are executing a lane of coding tasks sequentially.
 
 ## Rules
 - Complete each task fully before starting the next.
+- Work only inside the assigned worktree.
 - Do not modify files outside your assigned blast radius unless
   strictly necessary — if you must, note it in your completion report.
 - Run tests after each task if a test command is available.
 - After completing all tasks, update TASKS.md: set status to done and
   add evidence notes under each task's ACCEPTANCE section.
+- Commit your completed lane locally before stopping.
+- Do not push the branch or open a PR unless the user explicitly asks.
 - Report: for each task, list files modified and whether acceptance
   criteria are met.
 ```
@@ -307,7 +344,7 @@ Use the first file found. If multiple exist, merge relevant sections
 
 ## Bundled Scripts
 
-Three scripts automate the most error-prone steps. The agent executing this
+Four scripts automate the most error-prone steps. The agent executing this
 skill should call these instead of reasoning through the steps manually.
 
 ### `scripts/blast_radius.sh`
@@ -352,6 +389,19 @@ python scripts/partition.py blast_radii.json \
 Output: JSON with `lanes`, `overlap_edges`, `total_lanes`, and
 `max_parallelism`. This replaces all manual graph reasoning in Phase 3.
 
+### `scripts/worktree.sh`
+
+Creates, prints, and removes lane worktrees using the flat
+`~/worktrees/<repo>-<lane-branch>` convention.
+
+```bash
+./scripts/worktree.sh create --repo-root . --branch lane-1-auth-middleware --base main
+./scripts/worktree.sh path --repo-root . --branch lane-1-auth-middleware
+./scripts/worktree.sh remove --repo-root . --branch lane-1-auth-middleware
+```
+
+Use this script during dispatch instead of hand-building worktree paths.
+
 ### Recommended workflow
 
 ```plaintext
@@ -359,7 +409,11 @@ Output: JSON with `lanes`, `overlap_edges`, `total_lanes`, and
 2. For each file with public exports, run trace_imports.py → fill importers
 3. Collect all blast_radius objects into one JSON array
 4. Run partition.py with explicit deps → get lane assignments
-5. Present the plan (Phase 4)
+5. Present the plan (Phase 4) and wait for explicit approval
+6. On approval, create one branch + worktree per lane with worktree.sh
+7. Spawn one agent per worktree and have each lane commit locally
+8. Recommend merge order; push/PR only if the user explicitly requests it
+9. Remove worktrees after review or explicit cleanup approval
 ```
 
 ## Reference: TASKS.md Format
