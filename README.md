@@ -32,6 +32,42 @@ This is a personal collection of **agent skills**—specialized toolkits and fra
 
 Think of it as a living laboratory for multi-agent architectures.
 
+## Skill Archive Automation
+
+Every top-level non-hidden directory in this repository is treated as a skill.
+Each skill must contain a committed zip archive at:
+
+- `<skill>/<skill>.zip`
+
+The archive is rebuilt deterministically from the full skill directory, while
+excluding only the generated zip itself.
+
+### Local pre-commit setup
+
+Activate the repo-managed hook once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+After that, every commit automatically regenerates and stages zip files for any
+skills touched in the index.
+
+### Manual commands
+
+```bash
+python3 .skill-tools/package_skills.py --mode sync
+python3 .skill-tools/package_skills.py --mode verify
+```
+
+`sync` refreshes committed zip files in the working tree.
+`verify` fails if any committed zip file is missing or stale.
+
+### CI
+
+GitHub Actions runs the same verifier on every push and pull request and fails
+when a committed skill archive is out of date.
+
 ## 👥 Maintainers
 
 <table>

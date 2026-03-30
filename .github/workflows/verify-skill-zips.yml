@@ -1,0 +1,16 @@
+name: verify-skill-zips
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Verify committed skill archives
+        run: python3 .skill-tools/package_skills.py --mode verify
